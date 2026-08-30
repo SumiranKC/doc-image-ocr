@@ -1,0 +1,2 @@
+"""OCR extraction endpoint placeholder."""
+

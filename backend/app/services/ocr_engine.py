@@ -1,0 +1,2 @@
+"""OCR engine integration placeholder."""
+
