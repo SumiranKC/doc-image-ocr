@@ -1,7 +1,18 @@
-.env
+# Python environments and bytecode
+.venv/
 __pycache__/
 *.py[cod]
-.venv/
+
+# Node build artifacts and dependencies
 node_modules/
 dist/
 
+# Local configuration and operating-system files
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Editor metadata
+.idea/
+.vscode/
