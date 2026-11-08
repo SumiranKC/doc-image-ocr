@@ -16,3 +16,6 @@ dist/
 # Editor metadata
 .idea/
 .vscode/
+
+# Local saved forms and uploaded documents
+backend/data/

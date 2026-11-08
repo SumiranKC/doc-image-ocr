@@ -1,2 +1,0 @@
-"""Health-check endpoint placeholder."""
-
