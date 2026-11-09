@@ -74,7 +74,7 @@ The production image uses one Uvicorn worker, stores session data under `/data`,
 
 ## Deploy the backend to Railway
 
-The supported Railway Infrastructure-as-Code definition is in `.railway/railway.ts`. It declares the GitHub backend source, `/health` deployment check, GitHub Pages CORS origin, and a 512 MB `/data` volume in Singapore.
+The supported Railway Infrastructure-as-Code definition is in `.railway/railway.ts`. It declares the GitHub backend source, `/health` deployment check, GitHub Pages CORS origin, and a 500 MB `/data` volume in Singapore.
 
 Commit and push the current changes, create an empty Railway project, and then run:
 

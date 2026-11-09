@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir --requirement requirements.txt
 
 # Download the two English OCR models into the immutable image at build time.
 # This avoids a large model download during the first live request.
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
+RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
 
 RUN groupadd --system app \
     && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
