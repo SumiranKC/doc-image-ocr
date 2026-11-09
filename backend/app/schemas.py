@@ -57,6 +57,11 @@ class ExtractionResponse(BaseModel):
     fields: list[ExtractedField]
 
 
+class SessionCreated(BaseModel):
+    token: str
+    expires_at: datetime
+
+
 class MediaItem(BaseModel):
     id: str
     filename: str

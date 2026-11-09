@@ -39,11 +39,43 @@ export type SavedFormSummary = {
   updated_at: string
 }
 export type SavedForm = SavedFormSummary & { fields: Record<string, FieldValue>; media: MediaItem[] }
+type SessionCreated = { token: string; expires_at: string }
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const sessionStorageKey = 'document-ocr-session-token'
+let sessionRequest: Promise<string> | null = null
+
+async function createSession(): Promise<string> {
+  const response = await fetch(`${apiBaseUrl}/api/v1/sessions`, { method: 'POST' })
+  if (!response.ok) throw new Error('Could not start a temporary session. Please try again.')
+  const session = await response.json() as SessionCreated
+  sessionStorage.setItem(sessionStorageKey, session.token)
+  return session.token
+}
+
+export function initializeSession(): Promise<string> {
+  const stored = sessionStorage.getItem(sessionStorageKey)
+  if (stored) return Promise.resolve(stored)
+  if (!sessionRequest) {
+    sessionRequest = createSession().finally(() => { sessionRequest = null })
+  }
+  return sessionRequest
+}
+
+async function authenticatedResponse(path: string, options?: RequestInit): Promise<Response> {
+  const token = await initializeSession()
+  const headers = new Headers(options?.headers)
+  headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(`${apiBaseUrl}${path}`, { ...options, headers })
+  if (response.status === 401) {
+    sessionStorage.removeItem(sessionStorageKey)
+    throw new Error('Your temporary session expired. Refresh the page to start again.')
+  }
+  return response
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, options)
+  const response = await authenticatedResponse(path, options)
   if (!response.ok) {
     const error = await response.json().catch(() => null)
     throw new Error(typeof error?.detail === 'string' ? error.detail : `Request failed (${response.status})`)
@@ -52,12 +84,25 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json()
 }
 
-export function mediaPageUrl(formId: string, mediaId: string, pageIndex: number): string {
-  return `${apiBaseUrl}/api/v1/forms/${formId}/media/${mediaId}/pages/${pageIndex}`
+async function requestBlob(path: string): Promise<Blob> {
+  const response = await authenticatedResponse(path)
+  if (!response.ok) {
+    const error = await response.json().catch(() => null)
+    throw new Error(typeof error?.detail === 'string' ? error.detail : `Request failed (${response.status})`)
+  }
+  return response.blob()
 }
 
-export function originalMediaUrl(formId: string, mediaId: string): string {
-  return `${apiBaseUrl}/api/v1/forms/${formId}/media/${mediaId}`
+export function heartbeat(): Promise<void> {
+  return request('/api/v1/sessions/heartbeat', { method: 'POST' })
+}
+
+export function getMediaPage(formId: string, mediaId: string, pageIndex: number): Promise<Blob> {
+  return requestBlob(`/api/v1/forms/${formId}/media/${mediaId}/pages/${pageIndex}`)
+}
+
+export function getOriginalMedia(formId: string, mediaId: string): Promise<Blob> {
+  return requestBlob(`/api/v1/forms/${formId}/media/${mediaId}`)
 }
 
 export async function extractDocument(file: File, formType: FormType): Promise<ExtractionResponse> {

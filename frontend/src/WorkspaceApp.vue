@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  createSavedForm, deleteSavedForm, extractDocument, getSavedForm, listSavedForms,
-  mediaPageUrl, originalMediaUrl, saveUploadedMedia, updateSavedForm,
+  createSavedForm, deleteSavedForm, extractDocument, getMediaPage, getOriginalMedia,
+  getSavedForm, heartbeat, initializeSession, listSavedForms, saveUploadedMedia, updateSavedForm,
   type ExtractionResponse, type FieldValue, type FormType, type MediaItem,
   type SavedForm, type SavedFormSummary, type UploadMode,
 } from './api'
 
 type Definition = { key: string; label: string; long?: boolean }
 type ReviewMedia = MediaItem & { draft?: boolean }
+const maxSavedForms = 5
 const templates: Record<FormType, { name: string; description: string; fields: Definition[] }> = {
   person: {
     name: 'Contact Person', description: 'Capture an individual’s details from an image or PDF.',
@@ -40,6 +41,7 @@ const editing = ref(false)
 const draft = ref<ExtractionResponse | null>(null)
 const draftFile = ref<File | null>(null)
 const draftUrl = ref<string | null>(null)
+const savedMediaUrl = ref<string | null>(null)
 const mediaId = ref<string | null>(null)
 const pageIndex = ref(0)
 const activeField = ref<string | null>(null)
@@ -49,6 +51,7 @@ const error = ref('')
 const notice = ref('')
 
 const template = computed(() => pickedType.value ? templates[pickedType.value] : null)
+const formLimitReached = computed(() => savedForms.value.length >= maxSavedForms)
 const media = computed<ReviewMedia[]>(() => {
   const existing = mode.value === 'replace' ? [] : (selectedForm.value?.media ?? [])
   if (!draft.value || !draftFile.value) return existing
@@ -64,7 +67,7 @@ const imageUrl = computed(() => {
   const item = currentMedia.value
   if (!item) return ''
   if (item.draft) return item.pages[pageIndex.value]?.data_url ?? draftUrl.value ?? ''
-  return selectedForm.value ? mediaPageUrl(selectedForm.value.id, item.id, pageIndex.value) : ''
+  return savedMediaUrl.value ?? ''
 })
 const marks = computed(() => {
   const item = currentMedia.value
@@ -94,6 +97,10 @@ function clearDraft() {
   draft.value = null
   draftFile.value = null
   activeField.value = null
+}
+function clearSavedMediaUrl() {
+  if (savedMediaUrl.value) URL.revokeObjectURL(savedMediaUrl.value)
+  savedMediaUrl.value = null
 }
 function choose(type: FormType) {
   clearDraft()
@@ -150,8 +157,43 @@ async function syncRoute() {
     catch (caught) { error.value = getError(caught) }
   } else { screen.value = 'new' }
 }
-onMounted(() => { window.addEventListener('popstate', syncRoute); void syncRoute() })
-onBeforeUnmount(() => { window.removeEventListener('popstate', syncRoute); clearDraft() })
+let heartbeatTimer: number | undefined
+let mediaRequestVersion = 0
+watch(
+  [() => selectedForm.value?.id, () => currentMedia.value?.id, pageIndex],
+  async () => {
+    const version = ++mediaRequestVersion
+    clearSavedMediaUrl()
+    const form = selectedForm.value
+    const item = currentMedia.value
+    if (!form || !item || item.draft) return
+    try {
+      const blob = await getMediaPage(form.id, item.id, pageIndex.value)
+      if (version !== mediaRequestVersion) return
+      savedMediaUrl.value = URL.createObjectURL(blob)
+    } catch (caught) {
+      if (version === mediaRequestVersion) error.value = getError(caught)
+    }
+  },
+  { immediate: true },
+)
+onMounted(async () => {
+  window.addEventListener('popstate', syncRoute)
+  try {
+    await initializeSession()
+    await syncRoute()
+    heartbeatTimer = window.setInterval(() => {
+      void heartbeat().catch(caught => { error.value = getError(caught) })
+    }, 60_000)
+  } catch (caught) { error.value = getError(caught) }
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('popstate', syncRoute)
+  if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer)
+  mediaRequestVersion++
+  clearSavedMediaUrl()
+  clearDraft()
+})
 function getError(caught: unknown): string {
   return caught instanceof Error ? caught.message : 'Something went wrong. Please try again.'
 }
@@ -231,6 +273,33 @@ function selectMedia(id: string) { mediaId.value = id; pageIndex.value = 0; acti
 function points(box: { x: number; y: number }[]): string {
   return box.map(point => `${point.x},${point.y}`).join(' ')
 }
+async function openOriginal() {
+  if (!selectedForm.value || !currentMedia.value || currentMedia.value.draft) return
+  const formId = selectedForm.value.id
+  const currentMediaId = currentMedia.value.id
+  const target = window.open('about:blank', '_blank')
+  if (target) {
+    target.opener = null
+    target.document.title = 'Loading document…'
+    target.document.body.textContent = 'Loading document…'
+  }
+  try {
+    const blob = await getOriginalMedia(formId, currentMediaId)
+    const url = URL.createObjectURL(blob)
+    if (target) target.location.href = url
+    else {
+      const link = document.createElement('a')
+      link.href = url
+      link.target = '_blank'
+      link.rel = 'noopener'
+      link.click()
+    }
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (caught) {
+    target?.close()
+    error.value = getError(caught)
+  }
+}
 async function saveDraft() {
   if (!draft.value || !draftFile.value || !pickedType.value || !mode.value) return
   busy.value = true
@@ -280,6 +349,7 @@ function formatDate(value: string): string {
       </div>
     </header>
     <main class="mx-auto max-w-7xl px-5 pb-20 pt-10 sm:px-8">
+      <div role="note" class="mb-6 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900">Temporary session: saved forms and documents are available only in this browser tab and are automatically removed about one hour after activity stops. Each session can hold up to 5 saved forms and 40 MB of documents.</div>
       <div v-if="error" role="alert" class="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{{ error }}</div>
       <div v-if="notice" role="status" class="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{{ notice }}</div>
 
@@ -291,7 +361,7 @@ function formatDate(value: string): string {
       </template>
 
       <template v-else-if="screen === 'saved'">
-        <div class="flex flex-wrap items-end justify-between gap-4"><div><p class="eyebrow">Your records</p><h1 class="mt-2 text-4xl font-bold tracking-tight text-slate-950">Saved forms</h1><p class="mt-3 text-slate-600">Open a form to review its documents, make changes, or upload more.</p></div><button class="primary-button" @click="goNew">+ New form</button></div>
+        <div class="flex flex-wrap items-end justify-between gap-4"><div><p class="eyebrow">Your records</p><h1 class="mt-2 text-4xl font-bold tracking-tight text-slate-950">Saved forms</h1><p class="mt-3 text-slate-600">Open a form to review its documents, make changes, or upload more. {{ savedForms.length }} / {{ maxSavedForms }} form slots used.</p></div><button class="primary-button" :disabled="formLimitReached" @click="goNew">+ New form</button></div>
         <div v-if="!savedForms.length" class="mt-10 rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center"><p class="text-xl font-semibold text-slate-800">No forms saved yet</p><p class="mt-2 text-sm text-slate-500">Choose a form and upload a document to create your first record.</p><button class="primary-button mt-6" @click="goNew">Create a form</button></div>
         <div v-else class="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3"><button v-for="record in savedForms" :key="record.id" class="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-indigo-300 hover:shadow-md" @click="openRecord(record.id)"><span class="text-xs font-bold uppercase tracking-widest text-indigo-600">{{ templates[record.form_type].name }}</span><span class="mt-3 block truncate text-xl font-semibold text-slate-900">{{ record.display_name }}</span><span class="mt-5 flex items-center justify-between text-sm text-slate-500"><span>{{ record.media_count }} {{ record.media_count === 1 ? 'document' : 'documents' }}</span><span>{{ formatDate(record.updated_at) }}</span></span></button></div>
       </template>
@@ -303,7 +373,7 @@ function formatDate(value: string): string {
         <div v-if="mode && !draft" class="mt-8 max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8"><div class="flex items-start justify-between gap-4"><div><h2 class="text-xl font-semibold text-slate-900">{{ mode === 'replace' ? 'Replace the document and all data' : mode === 'add' ? 'Add to empty fields' : 'Upload a document' }}</h2><p class="mt-2 text-sm leading-relaxed text-slate-600">{{ mode === 'replace' ? 'The existing details and documents will be replaced when you save.' : mode === 'add' ? 'Existing filled fields stay intact. This document can fill empty fields.' : 'Upload an image or PDF to start filling this form.' }}</p></div><button v-if="screen === 'detail'" class="text-sm font-medium text-slate-500 hover:text-slate-900" @click="cancelUpload">Cancel</button></div><label class="mt-6 flex cursor-pointer flex-col items-center rounded-xl border-2 border-dashed border-indigo-200 bg-indigo-50/50 px-5 py-10 text-center hover:border-indigo-400 hover:bg-indigo-50"><span class="text-3xl text-indigo-600">↑</span><span class="mt-3 font-semibold text-indigo-800">Choose a document</span><span class="mt-1 text-sm text-slate-500">PNG, JPEG, WebP, or PDF · up to 10 MB · PDFs up to 10 pages</span><input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" @change="onFileChange"></label></div>
 
         <div v-if="draft || selectedForm" class="mt-8 grid items-start gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
-          <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-label="Document preview"><div class="border-b border-slate-100 px-5 py-4"><div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-lg font-semibold text-slate-900">Source document</h2><a v-if="selectedForm && currentMedia && !currentMedia.draft" class="text-sm font-medium text-indigo-700 hover:underline" :href="originalMediaUrl(selectedForm.id, currentMedia.id)" target="_blank" rel="noopener">Open original ↗</a></div><div v-if="media.length > 1" class="mt-4 flex flex-wrap gap-2" aria-label="Choose document"><button v-for="item in media" :key="item.id" class="max-w-52 truncate rounded-lg px-3 py-1.5 text-xs font-medium" :class="currentMedia?.id === item.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'" :title="item.filename" @click="selectMedia(item.id)">{{ item.filename }}</button></div><p v-if="currentMedia" class="mt-2 truncate text-xs text-slate-500">{{ currentMedia.filename }} <span v-if="currentMedia.mime_type === 'application/pdf'">· PDF preview</span></p></div><div v-if="currentMedia && currentPage" class="bg-slate-100 p-3 sm:p-5"><div class="relative mx-auto max-w-full overflow-hidden rounded-lg bg-white shadow" :style="{ aspectRatio: `${currentPage.width} / ${currentPage.height}` }"><img :src="imageUrl" :alt="`Page ${pageIndex + 1} of ${currentMedia.filename}`" class="block h-full w-full object-contain"><svg class="pointer-events-none absolute inset-0 h-full w-full" :viewBox="`0 0 ${currentPage.width} ${currentPage.height}`" preserveAspectRatio="none" aria-hidden="true"><polygon v-for="mark in marks" :key="mark.key" :points="points(mark.block.bounding_box)" :fill="mark.active ? '#f59e0b66' : '#6366f133'" :stroke="mark.active ? '#d97706' : '#4f46e5'" :stroke-width="mark.active ? 4 : 2" /></svg></div><div v-if="currentMedia.page_count > 1" class="mt-4 flex items-center justify-center gap-4 text-sm"><button class="secondary-button !px-3 !py-1.5" :disabled="pageIndex === 0" @click="pageIndex--">Previous</button><span class="font-medium text-slate-600">Page {{ pageIndex + 1 }} of {{ currentMedia.page_count }}</span><button class="secondary-button !px-3 !py-1.5" :disabled="pageIndex >= currentMedia.page_count - 1" @click="pageIndex++">Next</button></div></div></section>
+          <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-label="Document preview"><div class="border-b border-slate-100 px-5 py-4"><div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-lg font-semibold text-slate-900">Source document</h2><button v-if="selectedForm && currentMedia && !currentMedia.draft" class="text-sm font-medium text-indigo-700 hover:underline" @click="openOriginal">Open original ↗</button></div><div v-if="media.length > 1" class="mt-4 flex flex-wrap gap-2" aria-label="Choose document"><button v-for="item in media" :key="item.id" class="max-w-52 truncate rounded-lg px-3 py-1.5 text-xs font-medium" :class="currentMedia?.id === item.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'" :title="item.filename" @click="selectMedia(item.id)">{{ item.filename }}</button></div><p v-if="currentMedia" class="mt-2 truncate text-xs text-slate-500">{{ currentMedia.filename }} <span v-if="currentMedia.mime_type === 'application/pdf'">· PDF preview</span></p></div><div v-if="currentMedia && currentPage" class="bg-slate-100 p-3 sm:p-5"><div class="relative mx-auto max-w-full overflow-hidden rounded-lg bg-white shadow" :style="{ aspectRatio: `${currentPage.width} / ${currentPage.height}` }"><img :src="imageUrl" :alt="`Page ${pageIndex + 1} of ${currentMedia.filename}`" class="block h-full w-full object-contain"><svg class="pointer-events-none absolute inset-0 h-full w-full" :viewBox="`0 0 ${currentPage.width} ${currentPage.height}`" preserveAspectRatio="none" aria-hidden="true"><polygon v-for="mark in marks" :key="mark.key" :points="points(mark.block.bounding_box)" :fill="mark.active ? '#f59e0b66' : '#6366f133'" :stroke="mark.active ? '#d97706' : '#4f46e5'" :stroke-width="mark.active ? 4 : 2" /></svg></div><div v-if="currentMedia.page_count > 1" class="mt-4 flex items-center justify-center gap-4 text-sm"><button class="secondary-button !px-3 !py-1.5" :disabled="pageIndex === 0" @click="pageIndex--">Previous</button><span class="font-medium text-slate-600">Page {{ pageIndex + 1 }} of {{ currentMedia.page_count }}</span><button class="secondary-button !px-3 !py-1.5" :disabled="pageIndex >= currentMedia.page_count - 1" @click="pageIndex++">Next</button></div></div></section>
 
           <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7" aria-label="Form fields"><div class="flex flex-wrap items-start justify-between gap-3"><div><h2 class="text-lg font-semibold text-slate-900">{{ editing ? 'Edit details' : draft ? 'Review suggested details' : 'Form details' }}</h2><p class="mt-1 text-sm text-slate-500">{{ draft ? 'Highlighted fields came from the document. Select one to locate its source.' : 'Select a highlighted field to see where it came from.' }}</p></div><button v-if="editing" class="text-sm font-medium text-slate-500 hover:text-slate-900" @click="fields = copy(selectedForm!.fields); editing = false">Cancel</button></div><div class="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2"><div v-for="definition in template?.fields" :key="definition.key" :class="definition.long ? 'sm:col-span-2 lg:col-span-1 xl:col-span-2' : ''" @click="focusField(definition.key)"><div class="mb-1.5 flex flex-wrap items-center gap-2"><label class="text-sm font-semibold text-slate-700" :for="`field-${definition.key}`">{{ definition.label }}</label><span v-if="fields[definition.key]?.source_media_id && fields[definition.key]?.value" class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide" :class="fields[definition.key]?.edited ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'">{{ fields[definition.key]?.edited ? 'Corrected' : 'From document' }}</span></div><textarea v-if="definition.long" :id="`field-${definition.key}`" :value="fields[definition.key]?.value ?? ''" rows="3" class="field-input resize-y" :class="fields[definition.key]?.source_media_id ? 'border-indigo-300 bg-indigo-50/40' : ''" :readonly="!editable(definition.key)" @input="updateValue(definition.key, $event)" @focus="focusField(definition.key)" /><input v-else :id="`field-${definition.key}`" :value="fields[definition.key]?.value ?? ''" class="field-input" :class="fields[definition.key]?.source_media_id ? 'border-indigo-300 bg-indigo-50/40' : ''" type="text" :readonly="!editable(definition.key)" @input="updateValue(definition.key, $event)" @focus="focusField(definition.key)"><p v-if="locked(definition.key)" class="mt-1 text-xs text-slate-500">Kept from the existing form</p></div></div><div v-if="draft || editing" class="mt-8 flex flex-wrap gap-3 border-t border-slate-100 pt-6"><button class="primary-button" @click="draft ? saveDraft() : saveEdits()">{{ draft ? 'Finish and save' : 'Save changes' }}</button><button v-if="draft" class="secondary-button" @click="cancelUpload">Cancel upload</button></div></section>
         </div>
